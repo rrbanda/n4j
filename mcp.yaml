@@ -1,0 +1,154 @@
+# Neo4j MCP Server Deployment for OpenShift/Kubernetes
+# This deploys an MCP (Model Context Protocol) server that allows AI agents to query Neo4j
+#
+# PREREQUISITES:
+#   - A running Neo4j database (update NEO4J_URI to point to it)
+#
+# DEPLOY:
+#   oc apply -f neo4j-mcp-server.yaml -n YOUR_NAMESPACE
+#
+# CONNECT FROM AI AGENT:
+#   MCP Endpoint: http://mcp-neo4j:8080/mcp/
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mcp-neo4j-auth
+  labels:
+    app: mcp-neo4j
+    component: mcp-server
+type: Opaque
+stringData:
+  NEO4J_USERNAME: "neo4j"
+  NEO4J_PASSWORD: "your-neo4j-password"    # Change this!
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-neo4j
+  labels:
+    app: mcp-neo4j
+    component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-neo4j
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+      maxSurge: 25%
+  template:
+    metadata:
+      labels:
+        app: mcp-neo4j
+        component: mcp-server
+    spec:
+      containers:
+        - name: mcp-server
+          image: mcp/neo4j-cypher:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            # Neo4j Connection Settings
+            - name: NEO4J_URI
+              value: "bolt://neo4j:7687"           # Change to your Neo4j service name
+            - name: NEO4J_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-neo4j-auth
+                  key: NEO4J_USERNAME
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-neo4j-auth
+                  key: NEO4J_PASSWORD
+            - name: NEO4J_DATABASE
+              value: "neo4j"                       # Change to your database name
+            # MCP Server Settings
+            - name: NEO4J_TRANSPORT
+              value: "http"
+            - name: NEO4J_MCP_SERVER_HOST
+              value: "0.0.0.0"
+            - name: NEO4J_MCP_SERVER_PORT
+              value: "8080"
+            - name: NEO4J_MCP_SERVER_PATH
+              value: "/mcp/"
+            - name: NEO4J_MCP_SERVER_ALLOWED_HOSTS
+              value: "*"
+            # Safety & Performance
+            - name: NEO4J_READ_ONLY
+              value: "true"                        # Set to "false" if writes needed
+            - name: NEO4J_READ_TIMEOUT
+              value: "30"
+            - name: NEO4J_RESPONSE_TOKEN_LIMIT
+              value: "4000"                        # Limit response size for LLM context
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 30
+      restartPolicy: Always
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-neo4j
+  labels:
+    app: mcp-neo4j
+    component: mcp-server
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-neo4j
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Route for external access (OpenShift only)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: mcp-neo4j
+  labels:
+    app: mcp-neo4j
+    component: mcp-server
+spec:
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: mcp-neo4j
+    weight: 100
+  wildcardPolicy: None
